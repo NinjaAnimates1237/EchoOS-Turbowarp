@@ -1,898 +1,842 @@
 import os
 import re
 import asyncio
-import hmac
-import base64
+import sqlite3
 import hashlib
 import secrets
-import sqlite3
+import hmac
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-try:
-    import psycopg
-except Exception:
-    psycopg = None
+
+app = FastAPI()
+
+# ==========================================
+# SETTINGS
+# ==========================================
+
+DATABASE_FILE = "data.db"
+
+ADMIN_KEY = os.getenv(
+    "ADMIN_KEY",
+    "change-this-password"
+)
+
+clients = set()
 
 
-app = FastAPI(title="Echo WebSocket Server")
+# ==========================================
+# DATABASE
+# ==========================================
 
-ADMIN_KEY = os.getenv("ADMIN_KEY", "change-me")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-SQLITE_PATH = os.getenv("SQLITE_PATH", "data.db")
-
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
-
-clients: set[WebSocket] = set()
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def use_postgres() -> bool:
-    return bool(DATABASE_URL)
-
-
-def db_connect():
-    if use_postgres():
-        if psycopg is None:
-            raise RuntimeError(
-                "DATABASE_URL is set but psycopg is not installed"
-            )
-
-        return psycopg.connect(DATABASE_URL)
-
-    conn = sqlite3.connect(
-        SQLITE_PATH,
+def get_db():
+    connection = sqlite3.connect(
+        DATABASE_FILE,
         check_same_thread=False
     )
 
-    conn.row_factory = sqlite3.Row
-    return conn
+    connection.row_factory = sqlite3.Row
+
+    return connection
 
 
-def sql(query: str) -> str:
-    if use_postgres():
-        return query.replace("?", "%s")
+def setup_database():
 
-    return query
+    db = get_db()
 
+    cursor = db.cursor()
 
-def init_db():
-    with db_connect() as conn:
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
         )
+    """)
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_info (
-                user_id TEXT NOT NULL,
-                info_key TEXT NOT NULL,
-                info_value TEXT NOT NULL,
-                PRIMARY KEY (user_id, info_key)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_info (
+            user_id TEXT NOT NULL,
+            info_key TEXT NOT NULL,
+            info_value TEXT NOT NULL,
+
+            PRIMARY KEY (
+                user_id,
+                info_key
             )
-            """
         )
+    """)
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS server_settings (
-                setting_key TEXT PRIMARY KEY,
-                setting_value TEXT NOT NULL
-            )
-            """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
+    """)
 
-        cur.execute(
-            sql(
-                "SELECT setting_value "
-                "FROM server_settings "
-                "WHERE setting_key = ?"
-            ),
-            ("enabled",),
-        )
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings
+        (key, value)
 
-        row = cur.fetchone()
+        VALUES
+        ('server_enabled', '1')
+    """)
 
-        if row is None:
-            cur.execute(
-                sql(
-                    "INSERT INTO server_settings"
-                    "(setting_key, setting_value) "
-                    "VALUES (?, ?)"
-                ),
-                ("enabled", "1"),
-            )
+    db.commit()
 
-        conn.commit()
+    db.close()
 
 
 @app.on_event("startup")
-def startup():
-    init_db()
+async def startup():
+
+    setup_database()
 
 
-def server_enabled():
-    with db_connect() as conn:
-        cur = conn.cursor()
+# ==========================================
+# PASSWORDS
+# ==========================================
 
-        cur.execute(
-            sql(
-                "SELECT setting_value "
-                "FROM server_settings "
-                "WHERE setting_key = ?"
-            ),
-            ("enabled",),
-        )
+def hash_password(password):
 
-        row = cur.fetchone()
+    salt = secrets.token_hex(16)
 
-        if row is None:
-            return True
-
-        if isinstance(row, sqlite3.Row):
-            value = row["setting_value"]
-        else:
-            value = row[0]
-
-        return str(value) == "1"
-
-
-def set_server_enabled(enabled: bool):
-    value = "1" if enabled else "0"
-
-    with db_connect() as conn:
-        cur = conn.cursor()
-
-        if use_postgres():
-            cur.execute(
-                """
-                INSERT INTO server_settings(
-                    setting_key,
-                    setting_value
-                )
-                VALUES (%s, %s)
-
-                ON CONFLICT (setting_key)
-                DO UPDATE SET
-                setting_value = EXCLUDED.setting_value
-                """,
-                ("enabled", value),
-            )
-
-        else:
-            cur.execute(
-                """
-                INSERT INTO server_settings(
-                    setting_key,
-                    setting_value
-                )
-                VALUES (?, ?)
-
-                ON CONFLICT(setting_key)
-                DO UPDATE SET
-                setting_value = excluded.setting_value
-                """,
-                ("enabled", value),
-            )
-
-        conn.commit()
-
-
-def hash_password(password: str):
-    salt = secrets.token_bytes(16)
-
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        210_000,
-    )
+    hashed = hashlib.sha256(
+        (
+            salt
+            +
+            password
+        ).encode()
+    ).hexdigest()
 
     return (
-        "pbkdf2_sha256$210000$"
-        + base64.b64encode(salt).decode()
-        + "$"
-        + base64.b64encode(digest).decode()
+        salt
+        +
+        ":"
+        +
+        hashed
     )
 
 
-def verify_password(password: str, encoded: str):
+def check_password(
+    password,
+    stored
+):
+
     try:
-        algo, rounds, salt_b64, digest_b64 = encoded.split("$", 3)
 
-        if algo != "pbkdf2_sha256":
-            return False
-
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(digest_b64)
-
-        actual = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt,
-            int(rounds),
+        salt, old_hash = stored.split(
+            ":",
+            1
         )
 
+        new_hash = hashlib.sha256(
+            (
+                salt
+                +
+                password
+            ).encode()
+        ).hexdigest()
+
         return hmac.compare_digest(
-            actual,
-            expected
+            new_hash,
+            old_hash
         )
 
     except Exception:
+
         return False
 
 
+# ==========================================
+# SERVER ON/OFF
+# ==========================================
+
+def is_server_enabled():
+
+    db = get_db()
+
+    cursor = db.cursor()
+
+    cursor.execute("""
+        SELECT value
+        FROM settings
+        WHERE key = 'server_enabled'
+    """)
+
+    result = cursor.fetchone()
+
+    db.close()
+
+    if result is None:
+        return True
+
+    return result["value"] == "1"
+
+
+def set_server_enabled(enabled):
+
+    db = get_db()
+
+    cursor = db.cursor()
+
+    value = (
+        "1"
+        if enabled
+        else
+        "0"
+    )
+
+    cursor.execute("""
+        INSERT INTO settings
+        (key, value)
+
+        VALUES
+        ('server_enabled', ?)
+
+        ON CONFLICT(key)
+
+        DO UPDATE SET
+        value = excluded.value
+    """, (value,))
+
+    db.commit()
+
+    db.close()
+
+
+# ==========================================
+# USER FUNCTIONS
+# ==========================================
+
 def register_user(
-    username: str,
-    user_id: str,
-    password: str
+    username,
+    password,
+    user_id
 ):
+
     username = username.strip()
+    password = password.strip()
     user_id = user_id.strip()
 
-    if not username or not user_id or not password:
-        return False, "REGISTER_ERROR:missing_field"
+    if not username:
+        return "REGISTER_ERROR:NO_USERNAME"
 
-    if (
-        len(username) > 64
-        or len(user_id) > 64
-        or len(password) > 256
-    ):
-        return False, "REGISTER_ERROR:field_too_long"
+    if not password:
+        return "REGISTER_ERROR:NO_PASSWORD"
 
-    try:
-        with db_connect() as conn:
-            cur = conn.cursor()
+    if not user_id:
+        return "REGISTER_ERROR:NO_ID"
 
-            cur.execute(
-                sql(
-                    "INSERT INTO users("
-                    "user_id, username, password_hash, created_at"
-                    ") VALUES (?, ?, ?, ?)"
-                ),
-                (
-                    user_id,
-                    username,
-                    hash_password(password),
-                    now_iso(),
-                ),
-            )
+    db = get_db()
 
-            conn.commit()
+    cursor = db.cursor()
 
-        return True, "REGISTERED"
+    # Check ID
+    cursor.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,)
+    )
 
-    except Exception as exc:
-        text = str(exc).lower()
+    if cursor.fetchone():
 
-        if "unique" in text or "duplicate" in text:
-            return False, "REGISTER_ERROR:user_exists"
+        db.close()
 
-        return False, "REGISTER_ERROR:database"
+        return "REGISTER_ERROR:ID_EXISTS"
 
+    # Check username
+    cursor.execute(
+        """
+        SELECT username
+        FROM users
+        WHERE username = ?
+        """,
+        (username,)
+    )
 
-def login_user(username: str, password: str):
-    with db_connect() as conn:
-        cur = conn.cursor()
+    if cursor.fetchone():
 
-        cur.execute(
-            sql(
-                "SELECT user_id, password_hash "
-                "FROM users "
-                "WHERE username = ?"
-            ),
-            (username.strip(),),
+        db.close()
+
+        return "REGISTER_ERROR:USERNAME_EXISTS"
+
+    password_hash = hash_password(
+        password
+    )
+
+    created_at = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    cursor.execute(
+        """
+        INSERT INTO users
+        (
+            id,
+            username,
+            password_hash,
+            created_at
         )
 
-        row = cur.fetchone()
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            username,
+            password_hash,
+            created_at
+        )
+    )
 
-        if row is None:
-            return False, "LOGIN_ERROR"
+    db.commit()
 
-        user_id = row[0]
-        password_hash = row[1]
+    db.close()
 
-        if verify_password(password, password_hash):
-            return True, f"LOGIN_OK:{user_id}"
-
-        return False, "LOGIN_ERROR"
+    return "REGISTERED"
 
 
-def set_info(
-    user_id: str,
-    key: str,
-    value: str
+def login_user(
+    username,
+    password
 ):
+
+    db = get_db()
+
+    cursor = db.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE username = ?
+        """,
+        (username,)
+    )
+
+    user = cursor.fetchone()
+
+    db.close()
+
+    if user is None:
+
+        return "LOGIN_ERROR"
+
+    if check_password(
+        password,
+        user["password_hash"]
+    ):
+
+        return (
+            "LOGIN_OK:"
+            +
+            user["id"]
+        )
+
+    return "LOGIN_ERROR"
+
+
+# ==========================================
+# STORE EXTRA INFO
+# ==========================================
+
+def set_user_info(
+    user_id,
+    key,
+    value
+):
+
     user_id = user_id.strip()
     key = key.strip()
+    value = value.strip()
 
-    if not user_id or not key:
-        return "SETINFO_ERROR:missing_field"
-
-    if key.lower() in {
+    if key.lower() in [
         "password",
         "password_hash"
-    }:
-        return "SETINFO_ERROR:reserved_key"
+    ]:
 
-    with db_connect() as conn:
-        cur = conn.cursor()
+        return "SETINFO_ERROR:INVALID_KEY"
 
-        cur.execute(
-            sql(
-                "SELECT user_id "
-                "FROM users "
-                "WHERE user_id = ?"
-            ),
-            (user_id,),
+    db = get_db()
+
+    cursor = db.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,)
+    )
+
+    if cursor.fetchone() is None:
+
+        db.close()
+
+        return "SETINFO_ERROR:USER_NOT_FOUND"
+
+    cursor.execute(
+        """
+        INSERT INTO user_info
+        (
+            user_id,
+            info_key,
+            info_value
         )
 
-        if cur.fetchone() is None:
-            return "SETINFO_ERROR:user_not_found"
+        VALUES (?, ?, ?)
 
-        if use_postgres():
-            cur.execute(
-                """
-                INSERT INTO user_info(
-                    user_id,
-                    info_key,
-                    info_value
-                )
-                VALUES (%s, %s, %s)
+        ON CONFLICT(
+            user_id,
+            info_key
+        )
 
-                ON CONFLICT (
-                    user_id,
-                    info_key
-                )
+        DO UPDATE SET
+        info_value = excluded.info_value
+        """,
+        (
+            user_id,
+            key,
+            value
+        )
+    )
 
-                DO UPDATE SET
-                info_value = EXCLUDED.info_value
-                """,
-                (
-                    user_id,
-                    key,
-                    value,
-                ),
-            )
+    db.commit()
 
-        else:
-            cur.execute(
-                """
-                INSERT INTO user_info(
-                    user_id,
-                    info_key,
-                    info_value
-                )
-                VALUES (?, ?, ?)
-
-                ON CONFLICT(
-                    user_id,
-                    info_key
-                )
-
-                DO UPDATE SET
-                info_value = excluded.info_value
-                """,
-                (
-                    user_id,
-                    key,
-                    value,
-                ),
-            )
-
-        conn.commit()
+    db.close()
 
     return "SETINFO_OK"
 
 
-def find_user(identifier: str) -> Optional[dict]:
+# ==========================================
+# GET USER
+# ==========================================
+
+def get_user(identifier):
+
     identifier = identifier.strip()
 
-    with db_connect() as conn:
-        cur = conn.cursor()
+    db = get_db()
 
-        cur.execute(
-            sql(
-                "SELECT user_id, username, created_at "
-                "FROM users "
-                "WHERE user_id = ? OR username = ?"
-            ),
-            (
-                identifier,
-                identifier,
-            ),
+    cursor = db.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            username,
+            created_at
+
+        FROM users
+
+        WHERE
+            id = ?
+            OR
+            username = ?
+        """,
+        (
+            identifier,
+            identifier
         )
+    )
 
-        row = cur.fetchone()
+    user = cursor.fetchone()
 
-        if row is None:
-            return None
+    if user is None:
 
-        user_id = row[0]
-        username = row[1]
-        created_at = row[2]
+        db.close()
 
-        cur.execute(
-            sql(
-                "SELECT info_key, info_value "
-                "FROM user_info "
-                "WHERE user_id = ? "
-                "ORDER BY info_key"
-            ),
-            (user_id,),
+        return None
+
+    cursor.execute(
+        """
+        SELECT
+            info_key,
+            info_value
+
+        FROM user_info
+
+        WHERE user_id = ?
+
+        ORDER BY info_key
+        """,
+        (
+            user["id"],
         )
+    )
 
-        extra_rows = cur.fetchall()
+    extra_info = cursor.fetchall()
 
-    info = {
-        "username": username,
-        "id": user_id,
-        "created_at": created_at,
+    result = {
+        "username": user["username"],
+        "id": user["id"],
+        "created_at": user["created_at"]
     }
 
-    for extra in extra_rows:
-        info[str(extra[0])] = str(extra[1])
+    for item in extra_info:
 
-    return info
+        result[
+            item["info_key"]
+        ] = item["info_value"]
+
+    db.close()
+
+    return result
 
 
-async def send_user_separately(
-    websocket: WebSocket,
-    identifier: str
+# ==========================================
+# SEND USER ONE MESSAGE AT A TIME
+# ==========================================
+
+async def send_user(
+    websocket,
+    identifier
 ):
-    user = find_user(identifier)
 
-    if not user:
+    user = get_user(
+        identifier
+    )
+
+    if user is None:
+
         await websocket.send_text(
             "USER_NOT_FOUND"
         )
+
         return
 
-    # Start
     await websocket.send_text(
         "BEGIN_USER"
     )
 
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(
+        0.1
+    )
 
-    # EACH ITEM IS SENT AS
-    # A SEPARATE WEBSOCKET MESSAGE
     for key, value in user.items():
 
         await websocket.send_text(
-            f"{key}:{value}"
+            str(key)
+            +
+            ":"
+            +
+            str(value)
         )
 
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(
+            0.1
+        )
 
-    # Finished
     await websocket.send_text(
         "END_USER"
     )
 
 
-async def read_next(
-    websocket: WebSocket
-):
-    try:
-        return await websocket.receive_text()
+# ==========================================
+# WEBSOCKET
+#
+# BOTH URLS WORK:
+#
+# wss://server.onrender.com
+# wss://server.onrender.com/ws
+# ==========================================
 
-    except WebSocketDisconnect:
-        return None
-
-
+@app.websocket("/")
 @app.websocket("/ws")
-async def websocket_endpoint(
+async def websocket_server(
     websocket: WebSocket
 ):
 
-    if not server_enabled():
-        await websocket.close(
-            code=1013,
-            reason="Server is turned off"
+    # If server manually turned off
+    if not is_server_enabled():
+
+        await websocket.accept()
+
+        await websocket.send_text(
+            "SERVER_OFF"
         )
+
+        await websocket.close()
+
         return
 
     await websocket.accept()
 
-    clients.add(websocket)
-
-    await websocket.send_text(
-        "CONNECTED"
+    clients.add(
+        websocket
     )
 
     try:
 
+        await websocket.send_text(
+            "CONNECTED"
+        )
+
         while True:
 
-            message = (
-                await websocket.receive_text()
-            ).strip()
+            message = await websocket.receive_text()
 
-            command = message.lower()
+            message = message.strip()
 
-            # ------------------------
+            if not message:
+                continue
+
+            lower = message.lower()
+
+            # ==================================
             # PING
-            # ------------------------
+            # ==================================
 
-            if command == "ping":
+            if lower == "ping":
 
                 await websocket.send_text(
                     "pong"
                 )
 
-            # ------------------------
-            # REGISTER COMMAND
-            # ------------------------
+                continue
 
-            elif command == "register":
 
-                await websocket.send_text(
-                    "SEND_USERNAME"
+            # ==================================
+            # GetUserID(12345)
+            # ==================================
+
+            match = re.fullmatch(
+                r"(?i)getuserid\s*\(\s*(.*?)\s*\)",
+                message
+            )
+
+            if match:
+
+                identifier = match.group(
+                    1
                 )
 
-                username = await read_next(
-                    websocket
+                await send_user(
+                    websocket,
+                    identifier
                 )
 
-                if username is None:
-                    break
+                continue
 
-                await websocket.send_text(
-                    "SEND_PASSWORD"
-                )
 
-                password = await read_next(
-                    websocket
-                )
+            # ==================================
+            # GetUserID
+            #
+            # then send ID
+            # ==================================
 
-                if password is None:
-                    break
-
-                await websocket.send_text(
-                    "SEND_ID"
-                )
-
-                user_id = await read_next(
-                    websocket
-                )
-
-                if user_id is None:
-                    break
-
-                _, reply = register_user(
-                    username,
-                    user_id,
-                    password
-                )
-
-                await websocket.send_text(
-                    reply
-                )
-
-            # ------------------------
-            # LOGIN
-            # ------------------------
-
-            elif command == "login":
-
-                await websocket.send_text(
-                    "SEND_USERNAME"
-                )
-
-                username = await read_next(
-                    websocket
-                )
-
-                if username is None:
-                    break
-
-                await websocket.send_text(
-                    "SEND_PASSWORD"
-                )
-
-                password = await read_next(
-                    websocket
-                )
-
-                if password is None:
-                    break
-
-                _, reply = login_user(
-                    username,
-                    password
-                )
-
-                await websocket.send_text(
-                    reply
-                )
-
-            # ------------------------
-            # SAVE EXTRA INFORMATION
-            # ------------------------
-
-            elif command == "setinfo":
+            if lower == "getuserid":
 
                 await websocket.send_text(
                     "SEND_ID"
                 )
 
-                user_id = await read_next(
-                    websocket
+                identifier = await websocket.receive_text()
+
+                await send_user(
+                    websocket,
+                    identifier
                 )
 
-                if user_id is None:
-                    break
+                continue
 
-                await websocket.send_text(
-                    "SEND_KEY"
-                )
 
-                key = await read_next(
-                    websocket
-                )
+            # ==================================
+            # SetInfo(ID,key,value)
+            #
+            # Example:
+            #
+            # SetInfo(12345,coins,500)
+            # ==================================
 
-                if key is None:
-                    break
+            match = re.fullmatch(
+                r"(?i)setinfo\s*\((.*?),(.*?),(.*?)\)",
+                message
+            )
 
-                await websocket.send_text(
-                    "SEND_VALUE"
-                )
+            if match:
 
-                value = await read_next(
-                    websocket
-                )
+                user_id = match.group(
+                    1
+                ).strip()
 
-                if value is None:
-                    break
+                key = match.group(
+                    2
+                ).strip()
 
-                result = set_info(
+                value = match.group(
+                    3
+                ).strip()
+
+                response = set_user_info(
                     user_id,
                     key,
                     value
                 )
 
                 await websocket.send_text(
-                    result
+                    response
                 )
 
-            # ------------------------
-            # getUserID
-            # then ID separately
-            # ------------------------
+                continue
 
-            elif command == "getuserid":
 
-                await websocket.send_text(
-                    "SEND_ID_OR_USERNAME"
-                )
+            # ==================================
+            # LOGIN(username,password)
+            # ==================================
 
-                identifier = await read_next(
-                    websocket
-                )
-
-                if identifier is None:
-                    break
-
-                await send_user_separately(
-                    websocket,
-                    identifier
-                )
-
-            # ------------------------
-            # getUserID 12345
-            # ------------------------
-
-            elif command.startswith(
-                "getuserid "
-            ):
-
-                identifier = message.split(
-                    " ",
-                    1
-                )[1]
-
-                await send_user_separately(
-                    websocket,
-                    identifier
-                )
-
-            # ------------------------
-            # EXACTLY YOUR SCRATCH BLOCK
-            #
-            # GetUserID(12345)
-            # ------------------------
-
-            elif re.fullmatch(
-                r"(?i)getuserid\s*\(.*\)",
+            match = re.fullmatch(
+                r"(?i)login\s*\((.*?),(.*?)\)",
                 message
-            ):
+            )
 
-                identifier = re.sub(
-                    r"(?i)^getuserid\s*\(",
-                    "",
-                    message
-                )
+            if match:
 
-                identifier = re.sub(
-                    r"\)\s*$",
-                    "",
-                    identifier
+                username = match.group(
+                    1
                 ).strip()
 
-                if identifier:
+                password = match.group(
+                    2
+                ).strip()
 
-                    await send_user_separately(
-                        websocket,
-                        identifier
-                    )
-
-                else:
-
-                    await websocket.send_text(
-                        "USER_NOT_FOUND"
-                    )
-
-            # ------------------------
-            # HELP
-            # ------------------------
-
-            elif command == "help":
-
-                commands = [
-                    "COMMAND:register",
-                    "COMMAND:login",
-                    "COMMAND:setInfo",
-                    "COMMAND:getUserID",
-                    "COMMAND:GetUserID(ID)",
-                    "END_HELP",
-                ]
-
-                for line in commands:
-
-                    await websocket.send_text(
-                        line
-                    )
-
-            # ------------------------
-            # YOUR CURRENT SCRATCH
-            # REGISTRATION SYSTEM
-            #
-            # Your blocks send:
-            #
-            # username
-            # password
-            # ID
-            #
-            # WITHOUT sending "register"
-            # first.
-            # ------------------------
-
-            else:
-
-                username = message
-
-                password = await read_next(
-                    websocket
-                )
-
-                if password is None:
-                    break
-
-                user_id = await read_next(
-                    websocket
-                )
-
-                if user_id is None:
-                    break
-
-                _, reply = register_user(
+                response = login_user(
                     username,
-                    user_id,
                     password
                 )
 
                 await websocket.send_text(
-                    reply
+                    response
                 )
 
+                continue
+
+
+            # ==================================
+            # YOUR CURRENT SCRATCH REGISTER
+            #
+            # Message 1 = USERNAME
+            # Message 2 = PASSWORD
+            # Message 3 = ID
+            #
+            # No "register" command required.
+            # ==================================
+
+            username = message
+
+            password = await websocket.receive_text()
+
+            user_id = await websocket.receive_text()
+
+            result = register_user(
+                username,
+                password,
+                user_id
+            )
+
+            await websocket.send_text(
+                result
+            )
+
+
     except WebSocketDisconnect:
+
         pass
 
+    except Exception as error:
+
+        print(
+            "WebSocket error:",
+            error
+        )
+
+        try:
+
+            await websocket.send_text(
+                "SERVER_ERROR"
+            )
+
+        except Exception:
+
+            pass
+
     finally:
-        clients.discard(websocket)
+
+        clients.discard(
+            websocket
+        )
 
 
-# ==========================
-# WEBSITE
-# ==========================
+# ==========================================
+# NORMAL WEBSITE
+# ==========================================
 
 @app.get("/")
-def home():
+async def homepage():
 
-    if use_postgres():
-        db_name = "PostgreSQL"
-    else:
-        db_name = "SQLite"
+    return JSONResponse({
+        "server": "EchoOS WebSocket Server",
+        "status": (
+            "ON"
+            if is_server_enabled()
+            else
+            "OFF"
+        ),
+        "websocket_paths": [
+            "/",
+            "/ws"
+        ],
+        "connected_clients": len(
+            clients
+        )
+    })
 
-    return JSONResponse(
-        {
-            "ok": True,
-            "websocket": "/ws",
-            "control": "/control",
-            "enabled": server_enabled(),
-            "database": db_name,
-        }
-    )
 
+# ==========================================
+# CONTROL WEBSITE
+# ==========================================
 
-CONTROL_HTML = """
-<!doctype html>
+CONTROL_PAGE = """
+<!DOCTYPE html>
 
 <html>
 
 <head>
 
-<meta charset="utf-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"
->
-
-<title>
-Echo WebSocket Control
-</title>
+<title>EchoOS Server</title>
 
 <style>
 
 body {
-    font-family: system-ui, sans-serif;
-    max-width: 640px;
-    margin: 50px auto;
-    padding: 0 20px;
     background: #111;
-    color: #eee;
-}
-
-input,
-button {
-    font-size: 18px;
-    padding: 12px;
-    margin: 6px 3px;
-    border-radius: 9px;
-    border: 1px solid #555;
-}
-
-input {
-    width: min(390px, 90%);
-    background: #222;
     color: white;
+    font-family: Arial;
+    text-align: center;
+    margin-top: 80px;
 }
 
 button {
+    padding: 15px 30px;
+    margin: 10px;
+    font-size: 20px;
     cursor: pointer;
 }
 
+input {
+    padding: 12px;
+    font-size: 18px;
+}
+
 #status {
-    margin-top: 18px;
-    font-weight: 700;
+    font-size: 24px;
+    margin: 25px;
 }
 
 </style>
@@ -902,80 +846,93 @@ button {
 <body>
 
 <h1>
-Echo WebSocket Server
+EchoOS WebSocket Server
 </h1>
 
-<p>
-Enter your ADMIN_KEY to turn
-the WebSocket server on or off.
-</p>
+<div id="status">
+Checking...
+</div>
 
 <input
-id="key"
-type="password"
-placeholder="ADMIN_KEY"
->
+    id="admin"
+    type="password"
+    placeholder="Admin key"
+/>
 
-<div>
+<br>
 
-<button onclick="setState('on')">
+<button onclick="turnOn()">
 Turn ON
 </button>
 
-<button onclick="setState('off')">
+<button onclick="turnOff()">
 Turn OFF
 </button>
 
-<button onclick="check()">
-Check Status
-</button>
-
-</div>
-
-<div id="status"></div>
-
 <script>
 
-async function setState(state) {
+async function updateStatus() {
+
+    const response =
+        await fetch("/api/status");
+
+    const data =
+        await response.json();
+
+    document.getElementById(
+        "status"
+    ).innerText =
+        data.enabled
+        ? "SERVER ON"
+        : "SERVER OFF";
+}
+
+
+async function turnOn() {
 
     const key =
         document.getElementById(
-            'key'
+            "admin"
         ).value;
 
-    const response =
-        await fetch(
-            '/api/' + state,
-            {
-                method: 'POST',
+    await fetch(
+        "/api/on",
+        {
+            method: "POST",
 
-                headers: {
-                    'X-Admin-Key': key
-                }
+            headers: {
+                "X-Admin-Key": key
             }
-        );
+        }
+    );
 
-    document.getElementById(
-        'status'
-    ).textContent =
-        await response.text();
+    updateStatus();
 }
 
 
-async function check() {
+async function turnOff() {
 
-    const response =
-        await fetch(
-            '/api/status'
-        );
+    const key =
+        document.getElementById(
+            "admin"
+        ).value;
 
-    document.getElementById(
-        'status'
-    ).textContent =
-        await response.text();
+    await fetch(
+        "/api/off",
+        {
+            method: "POST",
+
+            headers: {
+                "X-Admin-Key": key
+            }
+        }
+    );
+
+    updateStatus();
 }
 
-check();
+
+updateStatus();
 
 </script>
 
@@ -989,42 +946,53 @@ check();
     "/control",
     response_class=HTMLResponse
 )
-def control():
+async def control_page():
 
-    return CONTROL_HTML
+    return CONTROL_PAGE
 
+
+# ==========================================
+# STATUS API
+# ==========================================
 
 @app.get("/api/status")
-def status():
+async def status():
 
     return {
-        "enabled": server_enabled(),
-        "connected_clients": len(clients)
+        "enabled": is_server_enabled(),
+        "clients": len(clients)
     }
 
 
-def require_admin(
-    x_admin_key: Optional[str]
-):
+# ==========================================
+# ADMIN AUTH
+# ==========================================
+
+def verify_admin(key):
 
     if not hmac.compare_digest(
-        x_admin_key or "",
+        key or "",
         ADMIN_KEY
     ):
 
         raise HTTPException(
             status_code=401,
-            detail="Bad admin key"
+            detail="Wrong admin key"
         )
 
 
+# ==========================================
+# TURN SERVER ON
+# ==========================================
+
 @app.post("/api/on")
-async def turn_on(
-    x_admin_key: Optional[str] =
-    Header(default=None)
+async def server_on(
+    x_admin_key: str = Header(
+        default=""
+    )
 ):
 
-    require_admin(
+    verify_admin(
         x_admin_key
     )
 
@@ -1033,18 +1001,23 @@ async def turn_on(
     )
 
     return {
-        "ok": True,
+        "success": True,
         "enabled": True
     }
 
 
+# ==========================================
+# TURN SERVER OFF
+# ==========================================
+
 @app.post("/api/off")
-async def turn_off(
-    x_admin_key: Optional[str] =
-    Header(default=None)
+async def server_off(
+    x_admin_key: str = Header(
+        default=""
+    )
 ):
 
-    require_admin(
+    verify_admin(
         x_admin_key
     )
 
@@ -1052,25 +1025,36 @@ async def turn_off(
         False
     )
 
-    for ws in list(clients):
+    # Disconnect everyone
+    for websocket in list(
+        clients
+    ):
 
         try:
 
-            await ws.close(
-                code=1012,
-                reason="Server turned off by admin"
+            await websocket.send_text(
+                "SERVER_OFF"
             )
 
+            await websocket.close()
+
         except Exception:
+
             pass
 
-        clients.discard(ws)
+        clients.discard(
+            websocket
+        )
 
     return {
-        "ok": True,
+        "success": True,
         "enabled": False
     }
 
+
+# ==========================================
+# RUN LOCALLY
+# ==========================================
 
 if __name__ == "__main__":
 
@@ -1079,12 +1063,12 @@ if __name__ == "__main__":
     port = int(
         os.getenv(
             "PORT",
-            "8000"
+            8000
         )
     )
 
     uvicorn.run(
-        "server:app",
+        app,
         host="0.0.0.0",
         port=port
     )
