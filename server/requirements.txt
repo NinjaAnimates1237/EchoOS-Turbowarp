@@ -1,4 +1,3 @@
 fastapi
 uvicorn[standard]
 psycopg[binary]
-scratchattach
