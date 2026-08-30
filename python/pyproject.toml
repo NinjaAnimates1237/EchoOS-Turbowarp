@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixattach"
+version = "0.1.0"
+description = "Connect Python programs to PixAttach-enabled Gandi and TurboWarp projects"
+requires-python = ">=3.9"
+dependencies = ["websocket-client>=1.8,<2"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pixattach*"]
+
