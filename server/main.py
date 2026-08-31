@@ -13,6 +13,9 @@ rooms: Dict[str, Dict[str, Set[WebSocket]]] = defaultdict(
     lambda: {"project": set(), "controller": set()}
 )
 
+# Cloud-like Pix Vars kept for each project while the server is running.
+pix_variables: Dict[str, dict] = defaultdict(dict)
+
 
 def configured_tokens() -> Dict[str, str]:
     """Read optional per-project tokens from a JSON environment variable."""
@@ -121,12 +124,44 @@ async def websocket_endpoint(socket: WebSocket):
             }
         )
 
+        if client_type == "project":
+            await socket.send_json(
+                {"type": "pix_variables", "variables": pix_variables[project_id]}
+            )
+
         while True:
             packet = await socket.receive_json()
             packet_type = str(packet.get("type", ""))
 
             if packet_type == "ping":
                 await socket.send_json({"type": "pong"})
+                continue
+
+            if client_type == "project" and packet_type == "set_pix_variable":
+                name = str(packet.get("name", "")).strip()
+                if not name or len(name) > 64:
+                    await socket.send_json(
+                        {"type": "error", "error": "invalid_pix_variable_name"}
+                    )
+                    continue
+                value = packet.get("value", "")
+                pix_variables[project_id][name] = value
+                await broadcast(
+                    project_id,
+                    "project",
+                    {"type": "pix_variable_changed", "name": name, "value": value},
+                )
+                continue
+
+            if client_type == "project" and packet_type == "delete_pix_variable":
+                name = str(packet.get("name", "")).strip()
+                if name:
+                    pix_variables[project_id].pop(name, None)
+                    await broadcast(
+                        project_id,
+                        "project",
+                        {"type": "pix_variable_deleted", "name": name},
+                    )
                 continue
 
             # Python controllers may ask the running project to do these things.
@@ -162,4 +197,3 @@ async def websocket_endpoint(socket: WebSocket):
     finally:
         if project_id and client_type:
             remove_socket(project_id, client_type, socket)
-
