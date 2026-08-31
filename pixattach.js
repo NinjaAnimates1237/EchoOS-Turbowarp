@@ -13,9 +13,11 @@
       this.connected = false;
       this.projectID = "";
       this.token = "";
+
       this.lastValue = "";
       this.lastCommand = "";
       this.lastError = "";
+
       this.exposedVariables = new Set();
 
       this.pixVariables = new Map();
@@ -27,6 +29,7 @@
       return {
         id: "pixattach",
         name: "PixAttach",
+
         color1: "#7066FF",
         color2: "#564BCB",
         color3: "#4037A6",
@@ -41,10 +44,12 @@
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "ws://localhost:8000/ws"
               },
+
               PROJECT: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "my-project"
               },
+
               TOKEN: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "development-token"
@@ -99,6 +104,7 @@
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "Score"
               },
+
               VALUE: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "100"
@@ -134,9 +140,9 @@
           "---",
 
           {
-            blockType: Scratch.BlockType.BUTTON,
-            text: "Make A Pix Var",
-            func: "createPixVariable"
+            opcode: "createPixVariable",
+            blockType: "button",
+            text: "Make A Pix Var"
           },
 
           {
@@ -148,6 +154,7 @@
                 type: Scratch.ArgumentType.STRING,
                 menu: "pixVariableMenu"
               },
+
               VALUE: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "Hello!"
@@ -290,8 +297,15 @@
     }
 
     getPixVariableMenu() {
-      const names = Array.from(this.pixVariables.keys()).sort();
-      return names.length ? names : ["message"];
+      const names = Array.from(
+        this.pixVariables.keys()
+      ).sort();
+
+      if (names.length > 0) {
+        return names;
+      }
+
+      return ["message"];
     }
 
     createPixVariable() {
@@ -300,17 +314,23 @@
         "message"
       );
 
-      if (answer === null) return;
+      if (answer === null) {
+        return;
+      }
 
       const name = String(answer).trim();
 
       if (!name) {
-        this.handleError("Pix Var name cannot be empty");
+        this.handleError(
+          "Pix Var name cannot be empty"
+        );
         return;
       }
 
       if (name.length > 64) {
-        this.handleError("Pix Var names can be at most 64 characters");
+        this.handleError(
+          "Pix Var names can be at most 64 characters"
+        );
         return;
       }
 
@@ -323,38 +343,50 @@
       if (this.isConnected()) {
         this.sendPacket({
           type: "set_pix_variable",
-          name,
+          name: name,
           value: this.pixVariables.get(name)
         });
       }
     }
 
     setPixVariable(args) {
-      const name = Scratch.Cast.toString(args.NAME).trim();
+      const name = Scratch.Cast
+        .toString(args.NAME)
+        .trim();
 
       if (!name) {
-        this.handleError("Pix Var name cannot be empty");
+        this.handleError(
+          "Pix Var name cannot be empty"
+        );
         return;
       }
 
       const value = args.VALUE;
 
-      this.updatePixVariable(name, value, false);
+      this.updatePixVariable(
+        name,
+        value,
+        false
+      );
 
       if (!this.isConnected()) {
-        this.handleError("PixAttach is not connected");
+        this.handleError(
+          "PixAttach is not connected"
+        );
         return;
       }
 
       this.sendPacket({
         type: "set_pix_variable",
-        name,
-        value
+        name: name,
+        value: value
       });
     }
 
     getPixVariable(args) {
-      const name = Scratch.Cast.toString(args.NAME);
+      const name = Scratch.Cast.toString(
+        args.NAME
+      );
 
       if (this.pixVariables.has(name)) {
         return this.pixVariables.get(name);
@@ -364,19 +396,23 @@
     }
 
     deletePixVariable(args) {
-      const name = Scratch.Cast.toString(args.NAME);
+      const name = Scratch.Cast.toString(
+        args.NAME
+      );
 
       this.pixVariables.delete(name);
       this.refreshBlocks();
 
       if (!this.isConnected()) {
-        this.handleError("PixAttach is not connected");
+        this.handleError(
+          "PixAttach is not connected"
+        );
         return;
       }
 
       this.sendPacket({
         type: "delete_pix_variable",
-        name
+        name: name
       });
     }
 
@@ -388,29 +424,48 @@
       return this.lastPixVariableValue;
     }
 
-    updatePixVariable(name, value, fireHat = true) {
+    updatePixVariable(
+      name,
+      value,
+      fireHat = true
+    ) {
       name = Scratch.Cast.toString(name);
 
-      const isNew = !this.pixVariables.has(name);
+      const isNew =
+        !this.pixVariables.has(name);
 
-      this.pixVariables.set(name, value ?? "");
+      this.pixVariables.set(
+        name,
+        value ?? ""
+      );
+
       this.lastPixVariableName = name;
-      this.lastPixVariableValue = value ?? "";
+      this.lastPixVariableValue =
+        value ?? "";
 
       if (isNew) {
         this.refreshBlocks();
       }
 
       if (fireHat) {
-        runtime.startHats("pixattach_whenPixVariableChanged");
+        runtime.startHats(
+          "pixattach_whenPixVariableChanged"
+        );
       }
     }
 
     connect(args) {
-      const url = Scratch.Cast.toString(args.URL);
+      const url = Scratch.Cast.toString(
+        args.URL
+      );
 
-      this.projectID = Scratch.Cast.toString(args.PROJECT);
-      this.token = Scratch.Cast.toString(args.TOKEN);
+      this.projectID = Scratch.Cast.toString(
+        args.PROJECT
+      );
+
+      this.token = Scratch.Cast.toString(
+        args.TOKEN
+      );
 
       this.disconnect();
       this.lastError = "";
@@ -422,38 +477,59 @@
         return;
       }
 
-      this.socket.addEventListener("open", () => {
-        this.connected = true;
+      this.socket.addEventListener(
+        "open",
+        () => {
+          this.connected = true;
 
-        this.sendPacket({
-          type: "connect",
-          client_type: "project",
-          project_id: this.projectID,
-          token: this.token,
-          exposed_variables: Array.from(this.exposedVariables)
-        });
+          this.sendPacket({
+            type: "connect",
+            client_type: "project",
+            project_id: this.projectID,
+            token: this.token,
+            exposed_variables: Array.from(
+              this.exposedVariables
+            )
+          });
 
-        runtime.startHats("pixattach_whenConnected");
-      });
-
-      this.socket.addEventListener("message", event => {
-        this.handleMessage(event.data);
-      });
-
-      this.socket.addEventListener("close", () => {
-        const wasConnected = this.connected;
-
-        this.connected = false;
-        this.socket = null;
-
-        if (wasConnected) {
-          runtime.startHats("pixattach_whenDisconnected");
+          runtime.startHats(
+            "pixattach_whenConnected"
+          );
         }
-      });
+      );
 
-      this.socket.addEventListener("error", () => {
-        this.handleError("WebSocket connection error");
-      });
+      this.socket.addEventListener(
+        "message",
+        event => {
+          this.handleMessage(event.data);
+        }
+      );
+
+      this.socket.addEventListener(
+        "close",
+        () => {
+          const wasConnected =
+            this.connected;
+
+          this.connected = false;
+          this.socket = null;
+
+          if (wasConnected) {
+            runtime.startHats(
+              "pixattach_whenDisconnected"
+            );
+          }
+        }
+      );
+
+      this.socket.addEventListener(
+        "error",
+        () => {
+          this.handleError(
+            "WebSocket connection error"
+          );
+        }
+      );
     }
 
     disconnect() {
@@ -471,31 +547,42 @@
       return Boolean(
         this.connected &&
         this.socket &&
-        this.socket.readyState === WebSocket.OPEN
+        this.socket.readyState ===
+          WebSocket.OPEN
       );
     }
 
     findGlobalVariable(name) {
-      const stage = runtime.getTargetForStage();
+      const stage =
+        runtime.getTargetForStage();
 
       if (!stage || !stage.variables) {
         return null;
       }
 
-      const wanted = Scratch.Cast.toString(name);
+      const wanted =
+        Scratch.Cast.toString(name);
 
       return (
-        Object.values(stage.variables).find(variable => {
-          return variable.name === wanted && variable.type === "";
+        Object.values(
+          stage.variables
+        ).find(variable => {
+          return (
+            variable.name === wanted &&
+            variable.type === ""
+          );
         }) || null
       );
     }
 
     exposeVariable(args) {
-      const name = Scratch.Cast.toString(args.NAME);
+      const name =
+        Scratch.Cast.toString(args.NAME);
 
       if (!this.findGlobalVariable(name)) {
-        this.handleError(`Global variable "${name}" was not found`);
+        this.handleError(
+          `Global variable "${name}" was not found`
+        );
         return;
       }
 
@@ -504,20 +591,21 @@
       if (this.isConnected()) {
         this.sendPacket({
           type: "expose_variable",
-          name
+          name: name
         });
       }
     }
 
     hideVariable(args) {
-      const name = Scratch.Cast.toString(args.NAME);
+      const name =
+        Scratch.Cast.toString(args.NAME);
 
       this.exposedVariables.delete(name);
 
       if (this.isConnected()) {
         this.sendPacket({
           type: "hide_variable",
-          name
+          name: name
         });
       }
     }
@@ -529,11 +617,14 @@
     }
 
     setVariable(args) {
-      const variable = this.findGlobalVariable(args.NAME);
+      const variable =
+        this.findGlobalVariable(args.NAME);
 
       if (!variable) {
         this.handleError(
-          `Global variable "${Scratch.Cast.toString(args.NAME)}" was not found`
+          `Global variable "${Scratch.Cast.toString(
+            args.NAME
+          )}" was not found`
         );
         return;
       }
@@ -542,13 +633,21 @@
     }
 
     getVariable(args) {
-      const variable = this.findGlobalVariable(args.NAME);
-      return variable ? variable.value : "";
+      const variable =
+        this.findGlobalVariable(args.NAME);
+
+      if (variable) {
+        return variable.value;
+      }
+
+      return "";
     }
 
     sendValue(args) {
       if (!this.isConnected()) {
-        this.handleError("PixAttach is not connected");
+        this.handleError(
+          "PixAttach is not connected"
+        );
         return;
       }
 
@@ -573,13 +672,17 @@
     sendPacket(packet) {
       if (
         !this.socket ||
-        this.socket.readyState !== WebSocket.OPEN
+        this.socket.readyState !==
+          WebSocket.OPEN
       ) {
         return false;
       }
 
       try {
-        this.socket.send(JSON.stringify(packet));
+        this.socket.send(
+          JSON.stringify(packet)
+        );
+
         return true;
       } catch (error) {
         this.handleError(error);
@@ -587,14 +690,20 @@
       }
     }
 
-    setVariableFromServer(name, value) {
+    setVariableFromServer(
+      name,
+      value
+    ) {
       name = Scratch.Cast.toString(name);
 
-      if (!this.exposedVariables.has(name)) {
+      if (
+        !this.exposedVariables.has(name)
+      ) {
         return false;
       }
 
-      const variable = this.findGlobalVariable(name);
+      const variable =
+        this.findGlobalVariable(name);
 
       if (!variable) {
         return false;
@@ -603,7 +712,9 @@
       variable.value = value;
       this.lastCommand = "set_variable";
 
-      runtime.startHats("pixattach_whenVariableChanged");
+      runtime.startHats(
+        "pixattach_whenVariableChanged"
+      );
 
       return true;
     }
@@ -617,38 +728,57 @@
         this.lastValue = String(raw);
         this.lastCommand = "value";
 
-        runtime.startHats("pixattach_whenValueReceived");
+        runtime.startHats(
+          "pixattach_whenValueReceived"
+        );
+
         return;
       }
 
-      if (!packet || typeof packet !== "object") {
+      if (
+        !packet ||
+        typeof packet !== "object"
+      ) {
         return;
       }
 
-      this.lastCommand = packet.type || "unknown";
+      this.lastCommand =
+        packet.type || "unknown";
 
       if (packet.type === "value") {
-        this.lastValue = packet.value ?? "";
+        this.lastValue =
+          packet.value ?? "";
 
-        runtime.startHats("pixattach_whenValueReceived");
+        runtime.startHats(
+          "pixattach_whenValueReceived"
+        );
       }
 
-      else if (packet.type === "set_variable") {
-        const success = this.setVariableFromServer(
-          packet.name,
-          packet.value
-        );
+      else if (
+        packet.type === "set_variable"
+      ) {
+        const success =
+          this.setVariableFromServer(
+            packet.name,
+            packet.value
+          );
 
         this.sendPacket({
           type: "set_variable_result",
-          request_id: packet.request_id || "",
+          request_id:
+            packet.request_id || "",
           name: packet.name,
-          success
+          success: success
         });
       }
 
-      else if (packet.type === "get_variable") {
-        const name = Scratch.Cast.toString(packet.name);
+      else if (
+        packet.type === "get_variable"
+      ) {
+        const name =
+          Scratch.Cast.toString(
+            packet.name
+          );
 
         const variable =
           this.exposedVariables.has(name)
@@ -657,9 +787,12 @@
 
         this.sendPacket({
           type: "variable_value",
-          request_id: packet.request_id || "",
-          name,
-          value: variable ? variable.value : "",
+          request_id:
+            packet.request_id || "",
+          name: name,
+          value: variable
+            ? variable.value
+            : "",
           success: Boolean(variable),
           error: variable
             ? ""
@@ -667,10 +800,13 @@
         });
       }
 
-      else if (packet.type === "pix_variables") {
+      else if (
+        packet.type === "pix_variables"
+      ) {
         const variables =
           packet.variables &&
-          typeof packet.variables === "object"
+          typeof packet.variables ===
+            "object"
             ? packet.variables
             : {};
 
@@ -681,7 +817,10 @@
         this.refreshBlocks();
       }
 
-      else if (packet.type === "pix_variable_changed") {
+      else if (
+        packet.type ===
+        "pix_variable_changed"
+      ) {
         this.updatePixVariable(
           packet.name,
           packet.value,
@@ -689,10 +828,17 @@
         );
       }
 
-      else if (packet.type === "pix_variable_deleted") {
-        const name = Scratch.Cast.toString(packet.name);
+      else if (
+        packet.type ===
+        "pix_variable_deleted"
+      ) {
+        const name =
+          Scratch.Cast.toString(
+            packet.name
+          );
 
         this.pixVariables.delete(name);
+
         this.lastPixVariableName = name;
         this.lastPixVariableValue = "";
 
@@ -703,14 +849,18 @@
         );
       }
 
-      else if (packet.type === "ping") {
+      else if (
+        packet.type === "ping"
+      ) {
         this.sendPacket({
           type: "pong",
           time: Date.now()
         });
       }
 
-      else if (packet.type === "error") {
+      else if (
+        packet.type === "error"
+      ) {
         this.handleError(
           packet.message ||
           packet.error ||
@@ -725,9 +875,13 @@
           ? error.message
           : String(error);
 
-      runtime.startHats("pixattach_whenError");
+      runtime.startHats(
+        "pixattach_whenError"
+      );
     }
   }
 
-  Scratch.extensions.register(new PixAttach());
+  Scratch.extensions.register(
+    new PixAttach()
+  );
 })(Scratch);
