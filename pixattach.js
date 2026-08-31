@@ -17,6 +17,9 @@
       this.lastCommand = "";
       this.lastError = "";
       this.exposedVariables = new Set();
+      this.pixVariables = new Map();
+      this.lastPixVariableName = "";
+      this.lastPixVariableValue = "";
     }
 
     getInfo() {
@@ -43,6 +46,20 @@
           { opcode: "getVariable", blockType: Scratch.BlockType.REPORTER, text: "get variable [NAME]", allowDropAnywhere: true, arguments: { NAME: { type: Scratch.ArgumentType.STRING, defaultValue: "Score" }}},
           { opcode: "isVariableExposed", blockType: Scratch.BlockType.BOOLEAN, text: "variable [NAME] exposed?", arguments: { NAME: { type: Scratch.ArgumentType.STRING, defaultValue: "Score" }}},
           "---",
+          { blockType: Scratch.BlockType.BUTTON, text: "Create Pix Var", func: "createPixVariable" },
+          { opcode: "setPixVariable", blockType: Scratch.BlockType.COMMAND, text: "set Pix Var [NAME] to [VALUE]", arguments: {
+            NAME: { type: Scratch.ArgumentType.STRING, menu: "pixVariableMenu" }, VALUE: { type: Scratch.ArgumentType.STRING, defaultValue: "Hello!" }
+          }},
+          { opcode: "getPixVariable", blockType: Scratch.BlockType.REPORTER, text: "Pix Var [NAME]", allowDropAnywhere: true, arguments: {
+            NAME: { type: Scratch.ArgumentType.STRING, menu: "pixVariableMenu" }
+          }},
+          { opcode: "deletePixVariable", blockType: Scratch.BlockType.COMMAND, text: "delete Pix Var [NAME]", arguments: {
+            NAME: { type: Scratch.ArgumentType.STRING, menu: "pixVariableMenu" }
+          }},
+          { opcode: "lastChangedPixVariable", blockType: Scratch.BlockType.REPORTER, text: "changed Pix Var", allowDropAnywhere: true },
+          { opcode: "lastChangedPixValue", blockType: Scratch.BlockType.REPORTER, text: "changed Pix Var value", allowDropAnywhere: true },
+          { opcode: "whenPixVariableChanged", blockType: Scratch.BlockType.HAT, text: "when a Pix Var changes", isEdgeActivated: false },
+          "---",
           { opcode: "sendValue", blockType: Scratch.BlockType.COMMAND, text: "send [VALUE]", arguments: { VALUE: { type: Scratch.ArgumentType.STRING, defaultValue: "Hello!" }}},
           { opcode: "receivedValue", blockType: Scratch.BlockType.REPORTER, text: "received value", allowDropAnywhere: true },
           { opcode: "receivedCommand", blockType: Scratch.BlockType.REPORTER, text: "received command", allowDropAnywhere: true },
@@ -53,8 +70,66 @@
           { opcode: "whenValueReceived", blockType: Scratch.BlockType.HAT, text: "when PixAttach receives a value", isEdgeActivated: false },
           { opcode: "whenVariableChanged", blockType: Scratch.BlockType.HAT, text: "when PixAttach changes a variable", isEdgeActivated: false },
           { opcode: "whenError", blockType: Scratch.BlockType.HAT, text: "when PixAttach error occurs", isEdgeActivated: false }
-        ]
+        ],
+        menus: {
+          pixVariableMenu: { acceptReporters: true, items: "getPixVariableMenu" }
+        }
       };
+    }
+
+    refreshBlocks() {
+      try { Scratch.vm.extensionManager.refreshBlocks(); } catch (_) {}
+    }
+
+    getPixVariableMenu() {
+      const names = Array.from(this.pixVariables.keys()).sort();
+      return names.length ? names : ["message"];
+    }
+
+    createPixVariable() {
+      const answer = window.prompt("Create a Pix Var\n\nVariable name:", "message");
+      if (answer === null) return;
+      const name = String(answer).trim();
+      if (!name) { this.handleError("Pix Var name cannot be empty"); return; }
+      if (name.length > 64) { this.handleError("Pix Var names can be at most 64 characters"); return; }
+      if (!this.pixVariables.has(name)) this.pixVariables.set(name, "");
+      this.refreshBlocks();
+      if (this.isConnected()) this.sendPacket({ type: "set_pix_variable", name, value: this.pixVariables.get(name) });
+    }
+
+    setPixVariable(args) {
+      const name = Scratch.Cast.toString(args.NAME).trim();
+      if (!name) { this.handleError("Pix Var name cannot be empty"); return; }
+      const value = args.VALUE;
+      this.updatePixVariable(name, value, false);
+      if (!this.isConnected()) { this.handleError("PixAttach is not connected"); return; }
+      this.sendPacket({ type: "set_pix_variable", name, value });
+    }
+
+    getPixVariable(args) {
+      const name = Scratch.Cast.toString(args.NAME);
+      return this.pixVariables.has(name) ? this.pixVariables.get(name) : "";
+    }
+
+    deletePixVariable(args) {
+      const name = Scratch.Cast.toString(args.NAME);
+      this.pixVariables.delete(name);
+      this.refreshBlocks();
+      if (!this.isConnected()) { this.handleError("PixAttach is not connected"); return; }
+      this.sendPacket({ type: "delete_pix_variable", name });
+    }
+
+    lastChangedPixVariable() { return this.lastPixVariableName; }
+    lastChangedPixValue() { return this.lastPixVariableValue; }
+
+    updatePixVariable(name, value, fireHat = true) {
+      name = Scratch.Cast.toString(name);
+      const isNew = !this.pixVariables.has(name);
+      this.pixVariables.set(name, value ?? "");
+      this.lastPixVariableName = name;
+      this.lastPixVariableValue = value ?? "";
+      if (isNew) this.refreshBlocks();
+      if (fireHat) runtime.startHats("pixattach_whenPixVariableChanged");
     }
 
     connect(args) {
@@ -169,6 +244,19 @@
         const name = Scratch.Cast.toString(packet.name);
         const variable = this.exposedVariables.has(name) ? this.findGlobalVariable(name) : null;
         this.sendPacket({ type: "variable_value", request_id: packet.request_id || "", name, value: variable ? variable.value : "", success: Boolean(variable), error: variable ? "" : "variable_not_exposed_or_not_found" });
+      } else if (packet.type === "pix_variables") {
+        const variables = packet.variables && typeof packet.variables === "object" ? packet.variables : {};
+        this.pixVariables = new Map(Object.entries(variables));
+        this.refreshBlocks();
+      } else if (packet.type === "pix_variable_changed") {
+        this.updatePixVariable(packet.name, packet.value, true);
+      } else if (packet.type === "pix_variable_deleted") {
+        const name = Scratch.Cast.toString(packet.name);
+        this.pixVariables.delete(name);
+        this.lastPixVariableName = name;
+        this.lastPixVariableValue = "";
+        this.refreshBlocks();
+        runtime.startHats("pixattach_whenPixVariableChanged");
       } else if (packet.type === "ping") {
         this.sendPacket({ type: "pong", time: Date.now() });
       } else if (packet.type === "error") {
