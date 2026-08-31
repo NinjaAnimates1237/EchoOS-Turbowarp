@@ -13,14 +13,13 @@
       this.connected = false;
       this.projectID = "";
       this.token = "";
-
       this.lastValue = "";
       this.lastCommand = "";
       this.lastError = "";
 
       this.exposedVariables = new Set();
-
       this.pixVariables = new Map();
+
       this.lastPixVariableName = "";
       this.lastPixVariableValue = "";
     }
@@ -44,12 +43,10 @@
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "ws://localhost:8000/ws"
               },
-
               PROJECT: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "my-project"
               },
-
               TOKEN: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "development-token"
@@ -104,7 +101,6 @@
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "Score"
               },
-
               VALUE: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "100"
@@ -140,9 +136,9 @@
           "---",
 
           {
-            opcode: "createPixVariable",
             blockType: "button",
-            text: "Make A Pix Var"
+            text: "Make A Pix Var",
+            onClick: () => this.createPixVariable()
           },
 
           {
@@ -154,7 +150,6 @@
                 type: Scratch.ArgumentType.STRING,
                 menu: "pixVariableMenu"
               },
-
               VALUE: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "Hello!"
@@ -301,11 +296,9 @@
         this.pixVariables.keys()
       ).sort();
 
-      if (names.length > 0) {
-        return names;
-      }
-
-      return ["message"];
+      return names.length > 0
+        ? names
+        : ["message"];
     }
 
     createPixVariable() {
@@ -459,9 +452,10 @@
         args.URL
       );
 
-      this.projectID = Scratch.Cast.toString(
-        args.PROJECT
-      );
+      this.projectID =
+        Scratch.Cast.toString(
+          args.PROJECT
+        );
 
       this.token = Scratch.Cast.toString(
         args.TOKEN
@@ -636,11 +630,9 @@
       const variable =
         this.findGlobalVariable(args.NAME);
 
-      if (variable) {
-        return variable.value;
-      }
-
-      return "";
+      return variable
+        ? variable.value
+        : "";
     }
 
     sendValue(args) {
@@ -838,7 +830,6 @@
           );
 
         this.pixVariables.delete(name);
-
         this.lastPixVariableName = name;
         this.lastPixVariableValue = "";
 
